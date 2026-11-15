@@ -1,0 +1,11 @@
+{
+  "name": "commentarr-server",
+  "version": "1.0.0",
+  "description": "Shared, timestamped comments for self-hosted media servers. The server behind the Commentarr plugin.",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "main": "src/server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": { "start": "node --experimental-sqlite --no-warnings=ExperimentalWarning src/server.js", "test": "node --experimental-sqlite --no-warnings=ExperimentalWarning test/smoke.js" },
+  "repository": { "type": "git", "url": "https://github.com/tuikat/commentarr-server" }
+}

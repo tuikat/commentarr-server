@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{SITE_NAME}} admin</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="admin">
+<main class="wrap">
+  <header class="row">
+    <h1>{{SITE_NAME}} admin</h1>
+    <button id="signout" class="btn ghost" hidden>Sign out</button>
+  </header>
+
+  <form id="login" class="panel">
+    <label for="tok">Admin token</label>
+    <p class="muted">The <code>ADMIN_TOKEN</code> this server was started with. Kept in this tab only.</p>
+    <div class="row"><input id="tok" type="password" autocomplete="off" required><button class="btn">Sign in</button></div>
+    <p id="loginErr" class="err" role="alert"></p>
+  </form>
+
+  <section id="app" hidden>
+    <p id="overview" class="muted"></p>
+    <nav class="seg" role="tablist">
+      <button role="tab" data-tab="reports" aria-selected="true">Reports</button>
+      <button role="tab" data-tab="comments">Comments</button>
+      <button role="tab" data-tab="servers">Servers</button>
+      <button role="tab" data-tab="words">Banned words</button>
+    </nav>
+
+    <div data-panel="reports"><ul id="reports" class="list"></ul></div>
+
+    <div data-panel="comments" hidden>
+      <input id="q" type="search" placeholder="Search comments or names">
+      <ul id="comments" class="list"></ul>
+    </div>
+
+    <div data-panel="servers" hidden><ul id="servers" class="list"></ul></div>
+
+    <div data-panel="words" hidden>
+      <p class="muted">One word or phrase per line. Applies to every server: comments containing them can't be posted, and names can't use them. Each server's admins can add their own list too.</p>
+      <textarea id="words" rows="14"></textarea>
+      <div class="row"><button id="saveWords" class="btn">Save list</button><span id="wordsMsg" class="muted"></span></div>
+    </div>
+  </section>
+</main>
+<script>
+(function () {
+  var tok = sessionStorage.getItem('cmtr-admin') || '';
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var when = function (t) { return new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); };
+  var at = function (ms) { if (ms == null) return ''; var s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+
+  function api(method, p, body) {
+    return fetch('/api/v1/admin/' + p, { method: method, headers: { Authorization: 'Admin ' + tok, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || r.status); return j; }); });
+  }
+
+  function start() {
+    api('GET', 'overview').then(function (o) {
+      $('#login').hidden = true; $('#app').hidden = false; $('#signout').hidden = false;
+      var by = {}; o.comments.forEach(function (r) { by[r.status] = r.n; });
+      $('#overview').textContent = (by.visible || 0) + ' visible comments · ' + (by.hidden || 0) + ' hidden for review · ' + o.servers + ' servers · ' + o.users + ' people · ' + o.openReports + ' open reports';
+      load('reports');
+    }, function (e) { $('#loginErr').textContent = e.message === 'Not an admin' ? 'That token isn\'t right.' : e.message; sessionStorage.removeItem('cmtr-admin'); });
+  }
+
+  function commentRow(c, extra) {
+    return '<li><div class="body">' + esc(c.body) + '</div>' +
+      '<div class="meta">' + esc(c.author) + ' · ' + esc(c.server_name) + ' · ' + esc(c.title || '') + (c.pos_ms != null ? ' · at ' + at(c.pos_ms) : '') + ' · ' + when(c.created_at) +
+      (c.status !== 'visible' ? ' · <b>' + esc(c.status) + '</b>' : '') + (extra || '') + '</div>' +
+      '<div class="acts">' +
+        (c.status === 'visible' ? '<button class="btn ghost" data-act="comments/' + c.id + '/delete">Delete</button>' : '<button class="btn ghost" data-act="comments/' + c.id + '/restore">Restore</button>') +
+        '<button class="btn ghost" data-act="users/' + c.user_id + '/ban" data-confirm="Ban ' + esc(c.author) + ' everywhere and hide all their comments?">Ban person</button>' +
+      '</div></li>';
+  }
+
+  function load(tab) {
+    if (tab === 'reports') api('GET', 'reports').then(function (rows) {
+      $('#reports').innerHTML = rows.length ? rows.map(function (r) { return commentRow(r, ' · <b>' + r.reports + ' report' + (r.reports === 1 ? '' : 's') + '</b>' + (r.reasons ? ': ' + esc(r.reasons) : '')); }).join('') : '<li class="empty">No open reports.</li>';
+    });
+    if (tab === 'comments') api('GET', 'comments?q=' + encodeURIComponent($('#q').value)).then(function (rows) {
+      $('#comments').innerHTML = rows.length ? rows.map(function (r) { return commentRow(r); }).join('') : '<li class="empty">No comments match.</li>';
+    });
+    if (tab === 'servers') api('GET', 'servers').then(function (rows) {
+      $('#servers').innerHTML = rows.length ? rows.map(function (s) {
+        return '<li><div class="body">' + esc(s.name) + ' <span class="muted">(' + esc(s.kind) + ')</span></div><div class="meta">' + s.users + ' people · ' + s.comments + ' comments · last seen ' + when(s.last_seen) + (s.banned ? ' · <b>blocked</b>' : '') + '</div>' +
+          '<div class="acts"><button class="btn ghost" data-act="servers/' + s.id + '/' + (s.banned ? 'unban' : 'ban') + '"' + (s.banned ? '' : ' data-confirm="Block ' + esc(s.name) + ' and hide all its comments?"') + '>' + (s.banned ? 'Unblock' : 'Block server') + '</button></div></li>';
+      }).join('') : '<li class="empty">No servers yet.</li>';
+    });
+    if (tab === 'words') api('GET', 'words').then(function (r) { $('#words').value = r.words.join('\n'); });
+  }
+
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-tab]');
+    if (t) {
+      document.querySelectorAll('[data-tab]').forEach(function (b) { b.setAttribute('aria-selected', b === t); });
+      document.querySelectorAll('[data-panel]').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== t.getAttribute('data-tab'); });
+      load(t.getAttribute('data-tab'));
+    }
+    var a = e.target.closest('[data-act]');
+    if (a) {
+      if (a.dataset.confirm && !confirm(a.dataset.confirm)) return;
+      a.disabled = true;
+      api('POST', a.getAttribute('data-act')).then(function () { load(document.querySelector('[data-tab][aria-selected="true"]').getAttribute('data-tab')); start(); }, function (err) { alert(err.message); a.disabled = false; });
+    }
+  });
+  $('#login').addEventListener('submit', function (e) { e.preventDefault(); tok = $('#tok').value; sessionStorage.setItem('cmtr-admin', tok); start(); });
+  $('#signout').addEventListener('click', function () { sessionStorage.removeItem('cmtr-admin'); location.reload(); });
+  $('#saveWords').addEventListener('click', function () {
+    api('PUT', 'words', { words: $('#words').value.split('\n') }).then(function (r) { $('#words').value = r.words.join('\n'); $('#wordsMsg').textContent = 'Saved ' + r.words.length + ' entries.'; });
+  });
+  var qt; $('#q').addEventListener('input', function () { clearTimeout(qt); qt = setTimeout(function () { load('comments'); }, 300); });
+  if (tok) start();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{SITE_NAME}} — comments for your media server</title>
+<meta name="description" content="Shared, timestamped comments for Jellyfin. Watch something, see what everyone else thought at that exact moment.">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="wrap">
+  <section class="hero">
+    <h1>{{SITE_NAME}}</h1>
+    <p>Shared, timestamped comments for self-hosted Jellyfin. Watch something on your own server and see what everyone else said at that exact moment.</p>
+    <div class="cta">
+      <a class="btn" href="https://forester.dev/commentarr">Install on Jellyfin</a>
+      <a class="btn ghost" href="https://github.com/tuikat/commentarr">Plugin on GitHub</a>
+      <a class="btn ghost" href="https://github.com/tuikat/commentarr-server">Run your own server</a>
+    </div>
+  </section>
+
+  <section class="stats" aria-label="Live numbers">
+    <div><b id="s-comments">–</b>comments</div>
+    <div><b id="s-titles">–</b>titles discussed</div>
+    <div><b id="s-servers">–</b>servers connected</div>
+  </section>
+
+  <section class="panel">
+    <h2>This is the comment server</h2>
+    <p class="muted">There's nothing to browse here: comments live inside your media server's player. Install the Commentarr plugin and it connects to this server by default. Server API: <code>/api/v1</code>, version {{VERSION}}.</p>
+  </section>
+
+  <footer>
+    <a href="{{TERMS_URL}}">Terms</a>
+    <a href="{{PRIVACY_URL}}">Privacy</a>
+    <a href="https://github.com/tuikat/commentarr-server">Source (AGPL-3.0)</a>
+    <span>Report a comment from the player's comment menu.</span>
+  </footer>
+</main>
+<script>
+fetch('/api/v1/info').then(function (r) { return r.json(); }).then(function (i) {
+  var f = function (n) { return Number(n).toLocaleString(); };
+  document.getElementById('s-comments').textContent = f(i.stats.comments);
+  document.getElementById('s-titles').textContent = f(i.stats.titles);
+  document.getElementById('s-servers').textContent = f(i.stats.servers);
+});
+</script>
+</body>
+</html>
