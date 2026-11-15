@@ -344,7 +344,10 @@ route('GET', '/api/v1/comments', (req, url) => {
   const ok = visibleTo(v);
   const liked = new Set(db.prepare('SELECT l.comment_id FROM likes l JOIN comments c ON c.id = l.comment_id WHERE c.thread_id = ? AND l.user_id = ?').all(thread, v.uid).map((r) => r.comment_id));
   const t = db.prepare('SELECT id, title, kind FROM threads WHERE id = ?').get(thread);
-  return { thread: t, comments: rows.filter(ok).map((c) => shape(c, v, liked)) };
+  const shown = rows.filter(ok);
+  const tops = new Set(shown.filter((c) => !c.parent_id).map((c) => c.id));
+  // replies under a comment that is gone (deleted, hidden, filtered) go with it
+  return { thread: t, comments: shown.filter((c) => !c.parent_id || tops.has(c.parent_id)).map((c) => shape(c, v, liked)) };
 });
 
 route('POST', '/api/v1/comments', async (req, url) => {
@@ -649,5 +652,26 @@ function backup() {
 }
 setTimeout(backup, 60000).unref();
 setInterval(backup, 6 * 3600000).unref();
+
+// Deleted comments disappear from view at once; their rows are erased after 30 days (backups roll
+// over after 7 more), so a deletion is final. Replies to a deleted comment go with it.
+function purge() {
+  try {
+    const cutoff = now() - 30 * 86400000;
+    const ids = db.prepare("SELECT id FROM comments WHERE status = 'deleted' AND created_at < ?").all(cutoff).map((r) => r.id);
+    if (!ids.length) return;
+    db.exec('BEGIN');
+    for (const id of ids) {
+      for (const t of ['likes', 'reports']) db.prepare(`DELETE FROM ${t} WHERE comment_id = ?`).run(id);
+      db.prepare('DELETE FROM server_hidden WHERE comment_id = ?').run(id);
+      db.prepare('UPDATE comments SET parent_id = NULL WHERE parent_id = ?').run(id);
+      db.prepare('DELETE FROM comments WHERE id = ?').run(id);
+    }
+    db.exec('COMMIT');
+    console.log(`purged ${ids.length} deleted comment(s)`);
+  } catch (e) { try { db.exec('ROLLBACK'); } catch { } console.error('purge failed', e.message); }
+}
+setTimeout(purge, 90000).unref();
+setInterval(purge, 24 * 3600000).unref();
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { server.close(); db.close(); process.exit(0); });
