@@ -43,6 +43,10 @@ Put it behind HTTPS (a reverse proxy or a Cloudflare tunnel), because browsers o
 
 **If you run a server others can reach, you are responsible for what's posted on it.** Publish terms and a privacy notice, keep `/admin` behind extra protection (e.g. Cloudflare Access), and check reports.
 
+## For app developers
+
+Building a Jellyfin app and want comments in it natively? Everything is a documented HTTPS + JSON API: see **[docs/API.md](docs/API.md)**. `/api/v1` is a stable contract.
+
 ## How it works
 
 - **Servers** (`POST /api/v1/servers`) register once and get a key that never leaves the media server.
