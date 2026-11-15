@@ -11,6 +11,7 @@ async function call(method, p, body, auth) {
 }
 (async () => {
   ok((await call('GET', '/healthz')).j.ok, 'health');
+  const reg = async (name) => (await call('POST', '/api/v1/servers', { name })).j;
   const a = (await call('POST', '/api/v1/servers', { name: 'Smoke A' })).j;
   const b = (await call('POST', '/api/v1/servers', { name: 'Smoke B' })).j;
   ok(a.serverId && a.serverKey, 'register');
@@ -29,6 +30,9 @@ async function call(method, p, body, auth) {
   const listA = (await call('GET', '/api/v1/comments?ids=' + idsA.join(','), null, 'Bearer ' + ta)).j;
   ok(listA.comments.length === 3, 'one thread across tvdb/tmdb ids (' + listA.comments.length + ')');
   ok((await call('POST', `/api/v1/comments/${c2.j.id}/like`, null, 'Bearer ' + ta)).j.likes === 1, 'like');
+  await call('POST', '/api/v1/comments', { ids: ['tv/tvdb/81189/s1e4'], body: 'Episode four is the best one' }, 'Bearer ' + tb2);
+  const rel = (await call('GET', '/api/v1/related?ids=tv/tvdb/81189/s1e3', null, 'Bearer ' + ta)).j.comments;
+  ok(rel.length === 1 && rel[0].fromEpisode === 'S01E04', 'related comments from other episodes');
   ok((await call('POST', '/api/v1/comments', { ids: idsA, body: 'agreed', parentId: c1.j.id }, 'Bearer ' + tb)).status === 409, 'duplicate blocked');
   // banned words: server A bans "spoon"; A's users can't post it, and A's viewers don't see B's post with it
   await call('PUT', '/api/v1/server/words', { words: ['spoon'] }, 'Bearer ' + ta);
@@ -48,6 +52,7 @@ async function call(method, p, body, auth) {
   ok((await call('PUT', '/api/v1/me', { name: 'Alice W' }, 'Bearer ' + ta)).j.name === 'Alice W', 'rename');
   ok((await call('DELETE', `/api/v1/comments/${c2.j.id}`, null, 'Bearer ' + ta2)).status === 403, 'cannot delete others');
   ok((await call('DELETE', `/api/v1/comments/${r1.j.id}`, null, 'Bearer ' + tb)).j.deleted, 'delete own');
+  ok((await call('POST', '/api/v1/comments', { ids: idsA, body: 'agreed', parentId: c1.j.id }, 'Bearer ' + tb)).status === 200, 'repost after deleting is allowed');
   // SSE: open a stream as B, post as A, receive it
   const ctrl = new AbortController();
   const got = new Promise(async (resolve) => {
@@ -60,6 +65,14 @@ async function call(method, p, body, auth) {
   const ev = await Promise.race([got, new Promise((r) => setTimeout(() => r(''), 3000))]);
   ctrl.abort();
   ok(ev.includes('live one'), 'live stream delivers new comment');
+  // three brand-new servers reporting a comment must not be able to hide it
+  for (const [n, s] of [['x1', await reg('X1')], ['x2', await reg('X2')], ['x3', await reg('X3')]]) await call('POST', `/api/v1/comments/\${c1.j.id}/report`, { reason: 'brigade' }, 'Bearer ' + await tok(s, n, n));
+  ok((await call('GET', '/api/v1/comments?ids=' + idsA, null, 'Bearer ' + ta)).j.comments.some((c) => c.id === c1.j.id), 'fresh servers cannot auto-hide');
+  // watching a title nobody has commented on creates nothing
+  const before = (await call('GET', '/api/v1/info')).j.stats.titles;
+  const sc = new AbortController(); fetch(BASE + '/api/v1/stream?ids=movie/tmdb/999999&token=' + encodeURIComponent(ta), { signal: sc.signal }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 300)); sc.abort();
+  ok((await call('GET', '/api/v1/comments?ids=movie/tmdb/999999', null, 'Bearer ' + ta)).j.thread === null, 'stream creates no thread');
   if (ADMIN) {
     ok((await call('GET', '/api/v1/admin/overview', null, 'Admin ' + ADMIN)).status === 200, 'global admin');
     ok((await call('GET', '/api/v1/admin/overview', null, 'Admin nope')).status === 401, 'bad admin token rejected');

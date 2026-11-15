@@ -1,6 +1,6 @@
 {
   "name": "commentarr-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shared, timestamped comments for self-hosted media servers. The server behind the Commentarr plugin.",
   "license": "AGPL-3.0-or-later",
   "private": true,

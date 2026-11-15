@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { open } = require('./db');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PORT = Number(process.env.PORT || 8790);
 const DATA = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PUBLIC = path.join(__dirname, '..', 'public');
@@ -18,6 +18,10 @@ const TRUST_PROXY = process.env.TRUST_PROXY !== '0';          // behind Cloudfla
 const TERMS_URL = process.env.TERMS_URL || '';
 const PRIVACY_URL = process.env.PRIVACY_URL || '';
 const AUTO_HIDE_REPORTS = Number(process.env.AUTO_HIDE_REPORTS || 3);
+// Only established servers count towards automatic hiding, so three fresh registrations
+// can't make a comment vanish.
+const REPORT_TRUST_AGE = Number(process.env.REPORT_TRUST_HOURS || 48) * 3600000;
+const MAX_USERS_PER_SERVER = Number(process.env.MAX_USERS_PER_SERVER || 200);
 const TOKEN_TTL = 12 * 3600 * 1000;
 const MAX_BODY = 1000;
 const MAX_NAME = 32;
@@ -173,23 +177,41 @@ function shape(c, viewer, likedSet) {
 
 // ------------------------------------------------------------------ live (SSE) --
 
-const streams = new Map();            // threadId -> Set<{res, viewer}>
+// Subscriptions are keyed by the ids a viewer knows the title by, so watching a title that has
+// no comments yet creates nothing in the database. Publishing fans out to every alias of a thread.
+const streams = new Map();            // alias -> Set<{res, viewer}>
+const MAX_STREAMS = Number(process.env.MAX_STREAMS || 5000);
+const MAX_STREAMS_PER_IP = Number(process.env.MAX_STREAMS_PER_IP || 12);
+let streamCount = 0;
+const streamsByIp = new Map();
+function listeners(threadId) {
+  const out = new Set();
+  for (const r of db.prepare('SELECT alias FROM aliases WHERE thread_id = ?').all(threadId)) {
+    const set = streams.get(r.alias);
+    if (set) for (const e of set) out.add(e);
+  }
+  return out;
+}
 function publish(threadId, row) {
-  const set = streams.get(threadId);
-  if (!set) return;
-  for (const s of set) {
+  const filters = new Map();           // one visibility check per media server, not per viewer
+  for (const s of listeners(threadId)) {
     try {
-      if (!visibleTo(s.viewer)(row)) continue;
+      let ok = filters.get(s.viewer.sid);
+      if (!ok) { ok = visibleTo(s.viewer); filters.set(s.viewer.sid, ok); }
+      if (!ok(row)) continue;
       s.res.write(`event: comment\ndata: ${JSON.stringify(shape(row, s.viewer, new Set()))}\n\n`);
     } catch { /* closed */ }
   }
 }
 function publishRemoval(threadId, id) {
-  const set = streams.get(threadId);
-  if (!set) return;
-  for (const s of set) { try { s.res.write(`event: removed\ndata: ${JSON.stringify({ id })}\n\n`); } catch { } }
+  for (const s of listeners(threadId)) { try { s.res.write(`event: removed\ndata: ${JSON.stringify({ id })}\n\n`); } catch { } }
 }
-setInterval(() => { for (const set of streams.values()) for (const s of set) { try { s.res.write(': ping\n\n'); } catch { } } }, 25000).unref();
+setInterval(() => { const seen = new Set(); for (const set of streams.values()) for (const s of set) { if (seen.has(s)) continue; seen.add(s); try { s.res.write(': ping\n\n'); } catch { } } }, 25000).unref();
+
+function markDeleted(id, by) {
+  db.prepare("UPDATE comments SET status = 'deleted', deleted_at = ?, deleted_by = ? WHERE id = ?").run(now(), by, id);
+  console.log(new Date().toISOString(), 'comment', id, 'deleted by', by);
+}
 
 // ------------------------------------------------------------------ http plumbing --
 
@@ -301,6 +323,11 @@ route('POST', '/api/v1/token', async (req) => {
   const ext = String(b.userId || '').trim();
   if (!ext || ext.length > 100) fail(400, 'userId required');
   if (limited('tok:' + server.id, 600, 3600000)) fail(429, 'Slow down');
+  // A media server is a household or a group of friends; thousands of distinct users is a sock-puppet farm.
+  if (db.prepare('SELECT COUNT(*) n FROM users WHERE server_id = ?').get(server.id).n >= MAX_USERS_PER_SERVER
+      && !db.prepare('SELECT 1 FROM users WHERE id = ?').get(sha(server.id + ':' + String(b.userId || '').trim()).slice(0, 32))) {
+    fail(429, 'This media server has reached the user limit for the shared comment server.');
+  }
   const uid = sha(server.id + ':' + ext).slice(0, 32);
   let user = db.prepare('SELECT * FROM users WHERE id = ?').get(uid);
   if (!user) {
@@ -350,6 +377,33 @@ route('GET', '/api/v1/comments', (req, url) => {
   return { thread: t, comments: shown.filter((c) => !c.parent_id || tops.has(c.parent_id)).map((c) => shape(c, v, liked)) };
 });
 
+// The best comments on the rest of the show, for an episode whose own thread is quiet.
+// Episodes of one show share an id prefix (tv/tvdb/75978/...), so this needs no extra lookups.
+route('GET', '/api/v1/related', (req, url) => {
+  const v = viewerOf(req, url);
+  const ids = parseIds(url.searchParams.get('ids')).filter((a) => a.startsWith('tv/'));
+  if (!ids.length) return { comments: [] };
+  const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('limit')) || 12));
+  const here = findThread(ids);
+  const prefixes = [...new Set(ids.map((a) => a.replace(/s\d+e\d+$/, '')))];
+  const threads = new Map();   // thread id -> episode label
+  for (const p of prefixes) {
+    for (const r of db.prepare('SELECT alias, thread_id FROM aliases WHERE alias LIKE ?').all(p + '%')) {
+      if (r.thread_id === here || threads.has(r.thread_id)) continue;
+      const m = /s(\d+)e(\d+)$/.exec(r.alias);
+      if (m) threads.set(r.thread_id, 'S' + m[1].padStart(2, '0') + 'E' + m[2].padStart(2, '0'));
+    }
+  }
+  if (!threads.size) return { comments: [] };
+  const list = [...threads.keys()];
+  const rows = db.prepare(`${COMMENT_SQL.replace('SELECT c.id,', 'SELECT c.thread_id, c.id,')} WHERE c.thread_id IN (${list.map(() => '?').join(',')}) AND c.status = 'visible' AND c.parent_id IS NULL
+    ORDER BY c.likes DESC, c.created_at DESC LIMIT 200`).all(...list);
+  const ok = visibleTo(v);
+  return {
+    comments: rows.filter(ok).slice(0, limit).map((c) => ({ ...shape(c, v, new Set()), fromEpisode: threads.get(c.thread_id) || null })),
+  };
+});
+
 route('POST', '/api/v1/comments', async (req, url) => {
   const v = viewerOf(req, url);
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(v.uid);
@@ -362,10 +416,12 @@ route('POST', '/api/v1/comments', async (req, url) => {
   if (!body) fail(400, 'Write something first');
   if (body.length > MAX_BODY) fail(400, `Comments are limited to ${MAX_BODY} characters`);
   if (hits('global', body) || hits(v.sid, body)) fail(422, 'That comment contains a word that isn\'t allowed here.');
+  const ip = clientIp(req);
   if (limited('c:' + v.uid, 6, 60000) || limited('cd:' + v.uid, 120, 86400000)) fail(429, 'You\'re commenting very fast. Try again in a minute.');
+  if (limited('ci:' + ip, 20, 60000) || limited('cid:' + ip, 400, 86400000)) fail(429, 'A lot of comments are coming from your address. Try again later.');
   if (limited('cs:' + v.sid, 2000, 86400000)) fail(429, 'This server has hit today\'s comment limit.');
   // Exact repeats within a day are almost always spam.
-  if (db.prepare('SELECT 1 FROM comments WHERE user_id = ? AND body = ? AND created_at > ?').get(v.uid, body, now() - 86400000)) fail(409, 'You already posted that.');
+  if (db.prepare("SELECT 1 FROM comments WHERE user_id = ? AND body = ? AND created_at > ? AND status != 'deleted'").get(v.uid, body, now() - 86400000)) fail(409, 'You already posted that.');
 
   const pos = Number.isFinite(b.posMs) && b.posMs >= 0 && b.posMs < 48 * 3600000 ? Math.round(b.posMs) : null;
   const runtime = Number.isFinite(b.runtimeMs) && b.runtimeMs > 0 && b.runtimeMs < 48 * 3600000 ? Math.round(b.runtimeMs) : null;
@@ -388,7 +444,7 @@ route('POST', '/api/v1/comments/:id/like', (req, url, p) => {
   const id = Number(p.id);
   const c = db.prepare("SELECT id FROM comments WHERE id = ? AND status = 'visible'").get(id);
   if (!c) fail(404, 'Comment not found');
-  if (limited('l:' + v.uid, 60, 60000)) fail(429, 'Slow down');
+  if (limited('l:' + v.uid, 60, 60000) || limited('li:' + clientIp(req), 120, 60000)) fail(429, 'Slow down');
   const had = db.prepare('SELECT 1 FROM likes WHERE comment_id = ? AND user_id = ?').get(id, v.uid);
   if (had) db.prepare('DELETE FROM likes WHERE comment_id = ? AND user_id = ?').run(id, v.uid);
   else db.prepare('INSERT INTO likes (comment_id, user_id) VALUES (?, ?)').run(id, v.uid);
@@ -401,12 +457,14 @@ route('POST', '/api/v1/comments/:id/report', async (req, url, p) => {
   const id = Number(p.id);
   const c = db.prepare("SELECT id, thread_id, status FROM comments WHERE id = ? AND status = 'visible'").get(id);
   if (!c) fail(404, 'Comment not found');
-  if (limited('r:' + v.uid, 20, 3600000)) fail(429, 'Slow down');
+  if (limited('r:' + v.uid, 20, 3600000) || limited('ri:' + clientIp(req), 40, 3600000)) fail(429, 'Slow down');
   const b = await readJson(req);
   db.prepare('INSERT OR IGNORE INTO reports (comment_id, user_id, server_id, reason, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(id, v.uid, v.sid, String(b.reason || '').slice(0, 200), now());
   // Enough people from different servers agree: hide it until a moderator looks.
-  const n = db.prepare('SELECT COUNT(DISTINCT server_id) n FROM reports WHERE comment_id = ? AND resolved = 0').get(id).n;
+  const n = db.prepare(`SELECT COUNT(DISTINCT r.server_id) n FROM reports r JOIN servers s ON s.id = r.server_id
+    WHERE r.comment_id = ? AND r.resolved = 0 AND s.banned = 0 AND s.created_at < ?
+      AND EXISTS (SELECT 1 FROM comments c WHERE c.server_id = s.id AND c.status = 'visible')`).get(id, now() - REPORT_TRUST_AGE).n;
   if (n >= AUTO_HIDE_REPORTS) {
     db.prepare("UPDATE comments SET status = 'hidden' WHERE id = ?").run(id);
     publishRemoval(c.thread_id, id);
@@ -420,7 +478,7 @@ route('DELETE', '/api/v1/comments/:id', (req, url, p) => {
   if (!c) fail(404, 'Comment not found');
   const allowed = c.user_id === v.uid || (v.adm && c.server_id === v.sid);
   if (!allowed) fail(403, 'You can only delete your own comments');
-  db.prepare("UPDATE comments SET status = 'deleted' WHERE id = ?").run(c.id);
+  markDeleted(c.id, c.user_id === v.uid ? 'author' : 'server-admin:' + v.sid);
   publishRemoval(c.thread_id, c.id);
   return { deleted: true };
 });
@@ -429,14 +487,19 @@ route('GET', '/api/v1/stream', (req, url, p, res) => {
   const v = viewerOf(req, url);
   const ids = parseIds(url.searchParams.get('ids'));
   if (!ids.length) fail(400, 'No recognised ids');
-  const thread = findThread(ids) || ensureThread(ids, '');
-  if (limited('sse:' + clientIp(req), 60, 60000)) fail(429, 'Slow down');
+  const ip = clientIp(req);
+  if (limited('sse:' + ip, 60, 60000)) fail(429, 'Slow down');
+  if (streamCount >= MAX_STREAMS) fail(503, 'Live updates are busy right now; comments still load normally.');
+  if ((streamsByIp.get(ip) || 0) >= MAX_STREAMS_PER_IP) fail(429, 'Too many open comment streams from this address.');
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.write('retry: 5000\n\n');
   const entry = { res, viewer: v };
-  if (!streams.has(thread)) streams.set(thread, new Set());
-  streams.get(thread).add(entry);
-  req.on('close', () => { const s = streams.get(thread); if (s) { s.delete(entry); if (!s.size) streams.delete(thread); } });
+  for (const a of ids) { if (!streams.has(a)) streams.set(a, new Set()); streams.get(a).add(entry); }
+  streamCount++; streamsByIp.set(ip, (streamsByIp.get(ip) || 0) + 1);
+  req.on('close', () => {
+    for (const a of ids) { const s = streams.get(a); if (s) { s.delete(entry); if (!s.size) streams.delete(a); } }
+    streamCount--; const n = (streamsByIp.get(ip) || 1) - 1; if (n > 0) streamsByIp.set(ip, n); else streamsByIp.delete(ip);
+  });
   return undefined; // stays open
 });
 
@@ -474,7 +537,7 @@ route('POST', '/api/v1/server/comments/:id/:action', (req, url, p) => {
     case 'unhide': db.prepare('DELETE FROM server_hidden WHERE server_id = ? AND comment_id = ?').run(v.sid, id); break;
     case 'delete':
       if (c.server_id !== v.sid) fail(403, 'You can delete comments from your own users. Hide this one for your server instead.');
-      db.prepare("UPDATE comments SET status = 'deleted' WHERE id = ?").run(id);
+      markDeleted(id, 'server-admin:' + v.sid);
       publishRemoval(c.thread_id, id);
       break;
     case 'dismiss': db.prepare('UPDATE reports SET resolved = 1 WHERE comment_id = ? AND server_id = ?').run(id, v.sid); break;
@@ -538,7 +601,7 @@ route('GET', '/api/v1/admin/reports', (req) => { adminOf(req); return reportRows
 route('GET', '/api/v1/admin/comments', (req, url) => {
   adminOf(req);
   const q = (url.searchParams.get('q') || '').trim();
-  const rows = db.prepare(`${COMMENT_SQL.replace('FROM comments c', ', t.title FROM comments c JOIN threads t ON t.id = c.thread_id')}
+  const rows = db.prepare(`${COMMENT_SQL.replace('FROM comments c', ', t.title, c.deleted_by, c.deleted_at FROM comments c JOIN threads t ON t.id = c.thread_id')}
     WHERE (? = '' OR c.body LIKE ? OR u.name LIKE ?) ORDER BY c.created_at DESC LIMIT 200`).all(q, `%${q}%`, `%${q}%`);
   return rows;
 });
@@ -547,8 +610,8 @@ route('POST', '/api/v1/admin/comments/:id/:action', (req, url, p) => {
   const id = Number(p.id);
   const c = db.prepare('SELECT id, thread_id FROM comments WHERE id = ?').get(id);
   if (!c) fail(404, 'Comment not found');
-  if (p.action === 'delete') { db.prepare("UPDATE comments SET status = 'deleted' WHERE id = ?").run(id); publishRemoval(c.thread_id, id); }
-  else if (p.action === 'restore') db.prepare("UPDATE comments SET status = 'visible' WHERE id = ?").run(id);
+  if (p.action === 'delete') { markDeleted(id, 'operator'); publishRemoval(c.thread_id, id); }
+  else if (p.action === 'restore') db.prepare("UPDATE comments SET status = 'visible', deleted_at = NULL, deleted_by = NULL WHERE id = ?").run(id);
   else fail(404, 'Unknown action');
   db.prepare('UPDATE reports SET resolved = 1 WHERE comment_id = ?').run(id);
   return { ok: true };
@@ -658,7 +721,7 @@ setInterval(backup, 6 * 3600000).unref();
 function purge() {
   try {
     const cutoff = now() - 30 * 86400000;
-    const ids = db.prepare("SELECT id FROM comments WHERE status = 'deleted' AND created_at < ?").all(cutoff).map((r) => r.id);
+    const ids = db.prepare("SELECT id FROM comments WHERE status = 'deleted' AND COALESCE(deleted_at, created_at) < ?").all(cutoff).map((r) => r.id);
     if (!ids.length) return;
     db.exec('BEGIN');
     for (const id of ids) {
