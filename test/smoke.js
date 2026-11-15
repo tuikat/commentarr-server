@@ -53,6 +53,12 @@ async function call(method, p, body, auth) {
   ok((await call('DELETE', `/api/v1/comments/${c2.j.id}`, null, 'Bearer ' + ta2)).status === 403, 'cannot delete others');
   ok((await call('DELETE', `/api/v1/comments/${r1.j.id}`, null, 'Bearer ' + tb)).j.deleted, 'delete own');
   ok((await call('POST', '/api/v1/comments', { ids: idsA, body: 'agreed', parentId: c1.j.id }, 'Bearer ' + tb)).status === 200, 'repost after deleting is allowed');
+  // spoilers: flagged at post time, only the writer (or their admin) can change the flag
+  const spc = await call('POST', '/api/v1/comments', { ids: idsA, body: 'the twist is great', spoiler: true }, 'Bearer ' + ta);
+  ok(spc.j.spoiler === true, 'post marked as spoiler');
+  ok((await call('GET', '/api/v1/comments?ids=' + idsA, null, 'Bearer ' + tb)).j.comments.find((c) => c.id === spc.j.id).spoiler === true, 'others see the spoiler flag');
+  ok((await call('POST', `/api/v1/comments/${spc.j.id}/spoiler`, { spoiler: false }, 'Bearer ' + tb)).status === 403, 'strangers cannot unmark a spoiler');
+  ok((await call('POST', `/api/v1/comments/${spc.j.id}/spoiler`, { spoiler: false }, 'Bearer ' + ta)).j.spoiler === false, 'writer can unmark');
   // SSE: open a stream as B, post as A, receive it
   const ctrl = new AbortController();
   const got = new Promise(async (resolve) => {

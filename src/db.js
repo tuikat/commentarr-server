@@ -107,8 +107,9 @@ function open(dataDir) {
 
     CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
   `);
-  // migrations: who deleted a comment and when (for moderation history and the 30-day erase)
-  for (const col of ['deleted_at INTEGER', 'deleted_by TEXT']) {
+  // migrations: who deleted a comment and when (for moderation history and the 30-day erase),
+  // and whether its writer (or a moderator) marked it as a spoiler
+  for (const col of ['deleted_at INTEGER', 'deleted_by TEXT', 'spoiler INTEGER NOT NULL DEFAULT 0']) {
     try { db.exec(`ALTER TABLE comments ADD COLUMN ${col}`); } catch { /* already there */ }
   }
   return db;

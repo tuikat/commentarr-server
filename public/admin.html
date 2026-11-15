@@ -70,10 +70,11 @@
 
   function commentRow(c, extra) {
     return '<li><div class="body">' + esc(c.body) + '</div>' +
-      '<div class="meta">' + esc(c.author) + ' · ' + esc(c.server_name) + ' · ' + esc(c.title || '') + (c.pos_ms != null ? ' · at ' + at(c.pos_ms) : '') + ' · ' + when(c.created_at) +
+      '<div class="meta">' + esc(c.author) + ' · ' + esc(c.server_name) + ' · ' + esc(c.title || '') + (c.pos_ms != null ? ' · at ' + at(c.pos_ms) : '') + (c.spoiler ? ' · <b>spoiler</b>' : '') + ' · ' + when(c.created_at) +
       (c.status !== 'visible' ? ' · <b>' + esc(c.status) + (c.deleted_by ? ' by ' + esc(c.deleted_by) : '') + '</b>' : '') + (extra || '') + '</div>' +
       '<div class="acts">' +
         (c.status === 'visible' ? '<button class="btn ghost" data-act="comments/' + c.id + '/delete">Delete</button>' : '<button class="btn ghost" data-act="comments/' + c.id + '/restore">Restore</button>') +
+        (c.status === 'visible' ? '<button class="btn ghost" data-act="comments/' + c.id + '/' + (c.spoiler ? 'unspoiler' : 'spoiler') + '">' + (c.spoiler ? 'Not a spoiler' : 'Mark spoiler') + '</button>' : '') +
         '<button class="btn ghost" data-act="users/' + c.user_id + '/ban" data-confirm="Ban ' + esc(c.author) + ' everywhere and hide all their comments?">Ban person</button>' +
       '</div></li>';
   }

@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { open } = require('./db');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || 8790);
 const DATA = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PUBLIC = path.join(__dirname, '..', 'public');
@@ -143,7 +143,7 @@ function ensureThread(ids, title) {
 // ---------------------------------------------------------------- shaping --
 
 const COMMENT_SQL = `
-  SELECT c.id, c.parent_id, c.body, c.pos_ms, c.runtime_ms, c.status, c.likes, c.created_at,
+  SELECT c.id, c.parent_id, c.body, c.pos_ms, c.runtime_ms, c.status, c.likes, c.created_at, c.spoiler,
          c.user_id, c.server_id, u.name AS author, s.name AS server_name
   FROM comments c JOIN users u ON u.id = c.user_id JOIN servers s ON s.id = c.server_id`;
 
@@ -165,6 +165,7 @@ function shape(c, viewer, likedSet) {
     body: c.body,
     posMs: c.pos_ms,
     runtimeMs: c.runtime_ms,
+    spoiler: !!c.spoiler,
     createdAt: c.created_at,
     likes: c.likes,
     liked: likedSet.has(c.id),
@@ -202,6 +203,9 @@ function publish(threadId, row) {
       s.res.write(`event: comment\ndata: ${JSON.stringify(shape(row, s.viewer, new Set()))}\n\n`);
     } catch { /* closed */ }
   }
+}
+function publishSpoiler(threadId, id, spoiler) {
+  for (const s of listeners(threadId)) { try { s.res.write(`event: spoiler\ndata: ${JSON.stringify({ id, spoiler })}\n\n`); } catch { } }
 }
 function publishRemoval(threadId, id) {
   for (const s of listeners(threadId)) { try { s.res.write(`event: removed\ndata: ${JSON.stringify({ id })}\n\n`); } catch { } }
@@ -445,8 +449,8 @@ route('POST', '/api/v1/comments', async (req, url) => {
     if (!p || p.thread_id !== thread) fail(400, 'That comment is gone');
     parent = p.parent_id || p.id;     // one level of replies
   }
-  const { lastInsertRowid } = db.prepare('INSERT INTO comments (thread_id, user_id, server_id, parent_id, body, pos_ms, runtime_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(thread, v.uid, v.sid, parent, body, parent ? null : pos, runtime, now());
+  const { lastInsertRowid } = db.prepare('INSERT INTO comments (thread_id, user_id, server_id, parent_id, body, pos_ms, runtime_ms, spoiler, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(thread, v.uid, v.sid, parent, body, parent ? null : pos, runtime, b.spoiler === true ? 1 : 0, now());
   const row = db.prepare(`${COMMENT_SQL} WHERE c.id = ?`).get(Number(lastInsertRowid));
   publish(thread, row);
   return shape(row, v, new Set());
@@ -496,6 +500,20 @@ route('DELETE', '/api/v1/comments/:id', (req, url, p) => {
   return { deleted: true };
 });
 
+// The writer, or their server's admin, can mark a comment as a spoiler (or unmark it) after posting.
+route('POST', '/api/v1/comments/:id/spoiler', async (req, url, p) => {
+  const v = viewerOf(req, url);
+  const c = db.prepare("SELECT id, thread_id, user_id, server_id FROM comments WHERE id = ? AND status = 'visible'").get(Number(p.id));
+  if (!c) fail(404, 'Comment not found');
+  if (!(c.user_id === v.uid || (v.adm && c.server_id === v.sid))) fail(403, 'Only the writer or their server\'s admin can change that');
+  if (limited('sp:' + v.uid, 30, 60000)) fail(429, 'Slow down');
+  const b = await readJson(req);
+  const spoiler = b.spoiler !== false;
+  db.prepare('UPDATE comments SET spoiler = ? WHERE id = ?').run(spoiler ? 1 : 0, c.id);
+  publishSpoiler(c.thread_id, c.id, spoiler);
+  return { spoiler };
+});
+
 route('GET', '/api/v1/stream', (req, url, p, res) => {
   const v = viewerOf(req, url);
   const ids = parseIds(url.searchParams.get('ids'));
@@ -520,7 +538,7 @@ route('GET', '/api/v1/stream', (req, url, p, res) => {
 
 function reportRows(where, args) {
   return db.prepare(`
-    SELECT c.id, c.body, c.status, c.created_at, c.pos_ms, c.user_id, c.server_id,
+    SELECT c.id, c.body, c.status, c.created_at, c.pos_ms, c.spoiler, c.user_id, c.server_id,
            u.name AS author, s.name AS server_name, t.title,
            COUNT(r.user_id) AS reports, GROUP_CONCAT(NULLIF(r.reason, ''), ' · ') AS reasons
     FROM reports r
@@ -625,6 +643,7 @@ route('POST', '/api/v1/admin/comments/:id/:action', (req, url, p) => {
   if (!c) fail(404, 'Comment not found');
   if (p.action === 'delete') { markDeleted(id, 'operator'); publishRemoval(c.thread_id, id); }
   else if (p.action === 'restore') db.prepare("UPDATE comments SET status = 'visible', deleted_at = NULL, deleted_by = NULL WHERE id = ?").run(id);
+  else if (p.action === 'spoiler' || p.action === 'unspoiler') { const on = p.action === 'spoiler'; db.prepare('UPDATE comments SET spoiler = ? WHERE id = ?').run(on ? 1 : 0, id); publishSpoiler(c.thread_id, id, on); }
   else fail(404, 'Unknown action');
   db.prepare('UPDATE reports SET resolved = 1 WHERE comment_id = ?').run(id);
   return { ok: true };
