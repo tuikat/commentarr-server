@@ -1,8 +1,8 @@
 # commentarr-server
 
-The comment server behind **[Commentarr](https://github.com/tuikat/commentarr)** — shared, timestamped comments for self-hosted Jellyfin.
+The comment server behind **[Commentarr](https://github.com/tuikat/commentarr)**: shared, timestamped comments for self-hosted Jellyfin.
 
-> **You probably don't need this.** The Commentarr plugin uses the public server at **[comments.forester.dev](https://comments.forester.dev)** by default, and that's where everyone else's comments are. Run your own only if you want a **private** comment space — say, for a group of friends — that doesn't join the public conversation.
+> **You probably don't need this.** The Commentarr plugin uses the public server at **[comments.forester.dev](https://comments.forester.dev)** by default, and that's where everyone else's comments are. Run your own only if you want a **private** comment space (say, for a group of friends) that doesn't join the public conversation.
 
 ## Run it
 
@@ -18,7 +18,7 @@ docker run -d --name commentarr --restart unless-stopped \
   commentarr-server
 ```
 
-Put it behind HTTPS (a reverse proxy or a Cloudflare tunnel) — browsers on HTTPS Jellyfin servers can't call a plain-HTTP comment server. Then in Jellyfin: **Dashboard → Plugins → Commentarr → Comment server** = your address.
+Put it behind HTTPS (a reverse proxy or a Cloudflare tunnel), because browsers on HTTPS Jellyfin servers can't call a plain-HTTP comment server. Then in Jellyfin: **Dashboard → Plugins → Commentarr → Comment server** = your address.
 
 ### Settings
 
@@ -26,9 +26,9 @@ Put it behind HTTPS (a reverse proxy or a Cloudflare tunnel) — browsers on HTT
 | --- | --- | --- |
 | `PORT` | `8790` | |
 | `DATA_DIR` | `/data` | SQLite database and `backups/` (7 kept) |
-| `ADMIN_TOKEN` | — | Enables `/admin`. Long and random. |
+| `ADMIN_TOKEN` | (none) | Enables `/admin`. Long and random. |
 | `SITE_NAME` | `Commentarr` | Shown on the landing and admin pages |
-| `TERMS_URL`, `PRIVACY_URL` | — | Linked from the landing page and returned by `/api/v1/info`. You need your own if you run a public server. |
+| `TERMS_URL`, `PRIVACY_URL` | (none) | Linked from the landing page and returned by `/api/v1/info`. You need your own if you run a public server. |
 | `AUTO_HIDE_REPORTS` | `3` | Hide a comment for review once people on this many different servers report it |
 | `TRUST_PROXY` | `1` | Read the client IP from `CF-Connecting-IP` / `X-Forwarded-For` (for rate limits) |
 
@@ -43,8 +43,8 @@ Put it behind HTTPS (a reverse proxy or a Cloudflare tunnel) — browsers on HTT
 ## How it works
 
 - **Servers** (`POST /api/v1/servers`) register once and get a key that never leaves the media server.
-- The media server **vouches for each user** (`POST /api/v1/token`, `Authorization: Server <id>:<key>`) and passes the browser a 12-hour token. Users are stored as `sha256(server id + that server's user id)` with a display name — nothing else.
-- **Threads** are found by external ids — `movie/tmdb/603`, `movie/imdb/tt0133093`, `tv/tvdb/81189/s1e3`, `tv/tmdb/1396/s1e3` — so every copy of a title shares one thread. When two servers know a title by different ids, their threads are merged the first time both ids are seen together.
+- The media server **vouches for each user** (`POST /api/v1/token`, `Authorization: Server <id>:<key>`) and passes the browser a 12-hour token. Users are stored as `sha256(server id + that server's user id)` with a display name, and nothing else.
+- **Threads** are found by external ids (`movie/tmdb/603`, `movie/imdb/tt0133093`, `tv/tvdb/81189/s1e3`, `tv/tmdb/1396/s1e3`), so every copy of a title shares one thread. When two servers know a title by different ids, their threads are merged the first time both ids are seen together.
 - **Live**: `GET /api/v1/stream` (server-sent events) pushes new and removed comments.
 
 Run the end-to-end check against a running server: `ADMIN_TOKEN=… node --experimental-sqlite test/smoke.js http://127.0.0.1:8790`.

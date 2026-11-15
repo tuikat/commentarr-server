@@ -1,4 +1,4 @@
-// Commentarr server — shared, timestamped comments for self-hosted media servers.
+// Commentarr server: shared, timestamped comments for self-hosted media servers.
 // Zero dependencies: node:http + node:sqlite. AGPL-3.0-or-later.
 'use strict';
 
@@ -637,7 +637,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`${SITE_NAME} ${VERSION} listening on :${PORT} (data: ${DATA})${ADMIN_TOKEN ? '' : ' — ADMIN_TOKEN not set, /admin disabled'}`));
+server.listen(PORT, () => console.log(`${SITE_NAME} ${VERSION} listening on :${PORT} (data: ${DATA})${ADMIN_TOKEN ? '' : '; ADMIN_TOKEN not set, /admin disabled'}`));
 
 // Nightly consistent backup next to the database (keeps 7).
 function backup() {
