@@ -233,6 +233,7 @@ function send(res, status, data, headers = {}) {
   res.writeHead(status, {
     'Content-Type': typeof data === 'object' && !Buffer.isBuffer(data) ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
     'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
     ...headers,
   });
   res.end(body);
@@ -275,10 +276,22 @@ function serverOf(req) {
   return row;
 }
 
+// Wrong admin tokens are counted per address; after 10 in 15 minutes that address is refused
+// outright, right token or not, until the window passes.
+const adminFails = new Map();
 function adminOf(req) {
+  const ip = clientIp(req);
+  const t = now();
+  const recent = (adminFails.get(ip) || []).filter((x) => t - x < 15 * 60000);
+  if (recent.length >= 10) { adminFails.set(ip, recent); fail(429, 'Too many wrong admin tokens. Try again later.'); }
   const h = req.headers.authorization || '';
-  if (!ADMIN_TOKEN || !h.startsWith('Admin ') || !safeEqual(h.slice(6), ADMIN_TOKEN)) fail(401, 'Not an admin');
+  if (!ADMIN_TOKEN || !h.startsWith('Admin ') || !safeEqual(h.slice(6), ADMIN_TOKEN)) {
+    recent.push(t); adminFails.set(ip, recent);
+    console.log(new Date().toISOString(), 'rejected admin token from', ip);
+    fail(401, 'Not an admin');
+  }
 }
+setInterval(() => { const t = now(); for (const [k, v] of adminFails) if (!v.some((x) => t - x < 15 * 60000)) adminFails.delete(k); }, 600000).unref();
 
 function serverAdminOf(req, url) {
   const v = viewerOf(req, url);
@@ -663,7 +676,13 @@ function serveStatic(req, res, pathname) {
     'Cache-Control': file.endsWith('.html') ? 'no-cache' : 'public, max-age=3600',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
-    ...(file === 'admin.html' ? { 'X-Frame-Options': 'DENY', 'X-Robots-Tag': 'noindex' } : {}),
+    ...(file === 'admin.html' ? {
+      'X-Frame-Options': 'DENY',
+      'X-Robots-Tag': 'noindex',
+      // Even if something ever injected code into this page, the browser would refuse to send
+      // anything (the token included) anywhere but this server.
+      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+    } : {}),
   });
   res.end(body);
   return true;

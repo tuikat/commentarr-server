@@ -76,6 +76,8 @@ async function call(method, p, body, auth) {
   if (ADMIN) {
     ok((await call('GET', '/api/v1/admin/overview', null, 'Admin ' + ADMIN)).status === 200, 'global admin');
     ok((await call('GET', '/api/v1/admin/overview', null, 'Admin nope')).status === 401, 'bad admin token rejected');
+    for (let i = 0; i < 10; i++) await call('GET', '/api/v1/admin/overview', null, 'Admin nope');
+    ok((await call('GET', '/api/v1/admin/overview', null, 'Admin ' + ADMIN)).status === 429, 'locked out after repeated wrong tokens, even with the right one');
   }
   console.log(`\n${n} checks passed`);
 })().catch((e) => { console.error(e); process.exit(1); });
